@@ -1,88 +1,128 @@
-function readCSV(file) {
+document.getElementById('upload-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    const dsoFiles = document.getElementById('dso-files').files;
+    const pressureFile = document.getElementById('pressure-file').files[0];
+
+    if (dsoFiles.length === 0 || !pressureFile) {
+        alert('Please select both DSO and pressure data files.');
+        return;
+    }
+
+    const resultsContainer = document.getElementById('results');
+    resultsContainer.innerHTML = '';
+
+    readPressureFile(pressureFile).then(pressureData => {
+        Array.from(dsoFiles).forEach(dsoFile => {
+            readDsoFile(dsoFile).then(dsoData => {
+                const maxes = findMaxes(dsoData);
+                const meanMax = calculateMean(maxes);
+                const stdMax = calculateStd(maxes);
+                const pressure = mapPressureToFile(pressureData, dsoFile.name);
+                const result = {
+                    fileName: dsoFile.name,
+                    meanMax,
+                    stdMax,
+                    pressure
+                };
+                displayResult(result);
+            });
+        });
+    });
+});
+
+function readDsoFile(file) {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
-        reader.onload = (event) => {
+        reader.onload = function (event) {
             const text = event.target.result;
             const rows = text.split('\n');
-            const data = rows.map(row => row.split(','));
+            const data = [];
+            let headers;
+            rows.forEach(row => {
+                const cols = row.split(',');
+                if (cols[0] === 'Time (ms)') {
+                    headers = cols;
+                } else if (headers) {
+                    data.push(cols);
+                }
+            });
             resolve(data);
         };
-        reader.onerror = (error) => reject(error);
+        reader.readAsText(file);
+    });
+}
+
+function readPressureFile(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = function (event) {
+            const text = event.target.result;
+            const rows = text.split('\n');
+            const data = [];
+            rows.forEach(row => {
+                const cols = row.split(',');
+                if (cols.length > 1) {
+                    data.push({ date: new Date(cols[0]), pressure: parseFloat(cols[1]) });
+                }
+            });
+            resolve(data);
+        };
         reader.readAsText(file);
     });
 }
 
 function findMaxes(data) {
-    let maxes = [];
+    const maxes = [];
     let prev = 0;
     data.forEach(row => {
-        const value = parseFloat(row[1]);
-        if (!isNaN(value)) {
-            const i = Math.abs(value);
-            if (prev > Math.max(4 * i, 10)) {
-                maxes.push(prev);
-                prev = i;
-            } else if (prev < i) {
-                prev = i;
-            }
+        const val = Math.abs(parseFloat(row[1]));
+        if (prev > Math.max(4 * val, 10)) {
+            maxes.push(prev);
+            prev = val;
+        } else if (prev < val) {
+            prev = val;
         }
     });
-
-    const mean = maxes.reduce((a, b) => a + b, 0) / maxes.length;
-    const std = Math.sqrt(maxes.map(x => Math.pow(x - mean, 2)).reduce((a, b) => a + b, 0) / (maxes.length - 1));
-    const bound = mean - 2 * std;
-
-    maxes = maxes.filter(x => x >= bound);
-    return maxes.map(x => x * 16.318);
-}
-
-function processFiles() {
-    const input = document.getElementById('fileInput');
-    const files = input.files;
-
-    if (files.length === 0) {
-        alert('Please select files to process.');
-        return;
+    if (maxes.length > 0) {
+        maxes.shift();
     }
-
-    const results = [];
-    let filesProcessed = 0;
-
-    Array.from(files).forEach(file => {
-        readCSV(file).then(data => {
-            const headersIndex = data.findIndex(row => row[0] === 'Time (ms)');
-            const content = data.slice(headersIndex + 1);
-            const maxes = findMaxes(content);
-
-            if (maxes.length > 0) {
-                const meanMax = maxes.reduce((a, b) => a + b, 0) / maxes.length;
-                const stdMax = Math.sqrt(maxes.map(x => Math.pow(x - meanMax, 2)).reduce((a, b) => a + b, 0) / (maxes.length - 1));
-                results.push({
-                    'File Name': file.name,
-                    'Mean of Maxes': meanMax,
-                    'Standard Deviation of Maxes': stdMax
-                });
-            }
-
-            filesProcessed++;
-            if (filesProcessed === files.length) {
-                downloadResults(results);
-            }
-        }).catch(error => {
-            console.error('Error reading file:', error);
-        });
-    });
+    const std = calculateStd(maxes);
+    const bound = calculateMean(maxes) - 2 * std;
+    return maxes.filter(m => m >= bound);
 }
 
-function downloadResults(results) {
-    const csvContent = "data:text/csv;charset=utf-8," 
-        + "File Name,Mean of Maxes,Standard Deviation of Maxes\n"
-        + results.map(e => `${e['File Name']},${e['Mean of Maxes']},${e['Standard Deviation of Maxes']}`).join("\n");
+function calculateMean(array) {
+    return array.reduce((a, b) => a + b, 0) / array.length;
+}
 
-    const encodedUri = encodeURI(csvContent);
-    const link = document.getElementById('downloadLink');
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", "summary_results.csv");
-    link.style.display = 'block';
-    link.innerText = 'Download Results';
+function calculateStd(array) {
+    const mean = calculateMean(array);
+    return Math.sqrt(array.map(x => Math.pow(x - mean, 2)).reduce((a, b) => a + b) / (array.length - 1));
+}
+
+function mapPressureToFile(pressureData, fileName) {
+    const fileTimeStr = fileName.replace("Pokit DSO Export ", "").replace(".csv", "").replace("-", " ");
+    const fileTime = new Date(fileTimeStr);
+    let closest = pressureData[0];
+    let minDiff = Math.abs(fileTime - closest.date);
+    pressureData.forEach(entry => {
+        const diff = Math.abs(fileTime - entry.date);
+        if (diff < minDiff) {
+            closest = entry;
+            minDiff = diff;
+        }
+    });
+    return closest.pressure;
+}
+
+function displayResult(result) {
+    const resultsContainer = document.getElementById('results');
+    const resultDiv = document.createElement('div');
+    resultDiv.innerHTML = `
+        <h3>${result.fileName}</h3>
+        <p>Mean of Maxes: ${result.meanMax}</p>
+        <p>Standard Deviation of Maxes: ${result.stdMax}</p>
+        <p>Pressure (micron): ${result.pressure}</p>
+    `;
+    resultsContainer.appendChild(resultDiv);
 }
